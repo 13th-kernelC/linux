@@ -186,7 +186,7 @@ ENDPROC(idmap_cpu_replace_ttbr1)
  *	Initialise the processor for turning the MMU on.  Return in x0 the
  *	value of the SCTLR_EL1 register.
  */
-ENTRY(__cpu_setup)
+ENTRY(__cpu_setup)				// 여기서부터 시작
 	tlbi	vmalle1				// Invalidate local TLB
 	dsb	nsh
 

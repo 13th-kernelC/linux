@@ -79,7 +79,7 @@ _head:
 	 * This add instruction has no meaningful effect except that
 	 * its opcode forms the magic "MZ" signature required by UEFI.
 	 */
-	add	x13, x18, #0x16
+	add	x13, x18, #0x16	// UEFI에서 MZ 글자 생성, 부트로더 없을 경우 필요, https://blog.lse.epita.fr/articles/68-uefi-boot-stub-in-linux.html
 	b	stext
 #else
 	b	stext				// branch to kernel start, magic
@@ -210,10 +210,10 @@ section_table:
 #endif
 
 ENTRY(stext)
-	bl	preserve_boot_args
+	bl	preserve_boot_args // 236 line 이동
 	bl	el2_setup			// Drop to EL1, w20=cpu_boot_mode
 	mov	x23, xzr			// KASLR offset, defaults to 0
-	adrp	x24, __PHYS_OFFSET
+	adrp	x24, __PHYS_OFFSET		// x24에 KERNEL_START - TEXT_OFFSET 차이만큼 계산하여 offset 값으로 저장
 	bl	set_cpu_boot_mode_flag
 	bl	__create_page_tables		// x25=TTBR0, x26=TTBR1
 	/*
@@ -222,10 +222,20 @@ ENTRY(stext)
 	 * On return, the CPU will be ready for the MMU to be turned on and
 	 * the TCR will have been set.
 	 */
+						// 0번 라벨(0:  .quad....) 의 주소를 x27 에 저장 
 	ldr	x27, 0f				// address to jump to after
 						// MMU has been enabled
 	adr_l	lr, __enable_mmu		// return (PIC) address
 	b	__cpu_setup			// initialise processor
+	// 현재 코드에서 __cpu_setup 을 호출하고(bl 이 아니라 b 라는 것에 주의)
+	// __cpu_setup 이 끝나면 lr 에 강제로 설정된 __enable_mmu 함수가 실행된다
+	// 
+	// 현재 코드 -> __cpu_setup -> __enable_mmu -> x27 의 순서로 실행됨
+	// mmu 가 활성화 되면 주소 체계가 변경되므로
+	// mmu 가 활성화 된 이후에 jump 할 주소를 미리 x27 에 저장하도록 한다.
+	// 이를 위해서 아래의 KIMAGE_VADDR 가 필요한 것으로 보인다
+	// 어디까지나 추정임!!!!!
+
 ENDPROC(stext)
 	.align	3
 0:	.quad	__mmap_switched - (_head - TEXT_OFFSET) + KIMAGE_VADDR
@@ -234,17 +244,17 @@ ENDPROC(stext)
  * Preserve the arguments passed by the bootloader in x0 .. x3
  */
 preserve_boot_args:
-	mov	x21, x0				// x21=FDT
+	mov	x21, x0				// x21=FDT // x=0 FDT blob 물리주소, 하드웨어 정보 가지고 있음 http://www.informit.com/articles/article.aspx?p=1647051&seqNum=5 , 디바이스 트리 정보
 
-	adr_l	x0, boot_args			// record the contents of
+	adr_l	x0, boot_args			// record the contents of // boot_args의 주소를 x0에 넣는다. boot_args는 부트로더에서 넘어오는 배열
 	stp	x21, x1, [x0]			// x0 .. x3 at kernel entry
-	stp	x2, x3, [x0, #16]
+	stp	x2, x3, [x0, #16]		// x0번부터 x3까지 커널 엔트리에 채우기. stp 관련 http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.dui0802a/STP_gen.html , boot_args 배열에 x21(x0), x1, x2, x3 채우기
 
 	dmb	sy				// needed before dc ivac with
-						// MMU off
+						// MMU off 		// dmb는 데이터 배리어 sy는 시스템 전체.  
 
 	add	x1, x0, #0x20			// 4 x 8 bytes
-	b	__inval_cache_range		// tail call
+	b	__inval_cache_range		// tail call //arch/arm64/mm/cache.64 114 line
 ENDPROC(preserve_boot_args)
 
 /*
@@ -275,7 +285,7 @@ ENDPROC(preserve_boot_args)
  * Preserves:	tbl, next, virt
  * Corrupts:	tmp1, tmp2
  */
-	.macro	create_pgd_entry, tbl, virt, tmp1, tmp2
+	.macro	create_pgd_entry, tbl, virt, tmp1, tmp2		// SWAPPER_PGTABLE_LEVELS = 1 or 2
 	create_table_entry \tbl, \virt, PGDIR_SHIFT, PTRS_PER_PGD, \tmp1, \tmp2
 #if SWAPPER_PGTABLE_LEVELS > 3
 	create_table_entry \tbl, \virt, PUD_SHIFT, PTRS_PER_PUD, \tmp1, \tmp2
@@ -314,31 +324,40 @@ ENDPROC(preserve_boot_args)
  *     been enabled
  */
 __create_page_tables:
-	adrp	x25, idmap_pg_dir
-	adrp	x26, swapper_pg_dir
-	mov	x28, lr
+	adrp	x25, idmap_pg_dir	// cpu가 슬립에서 복구될때 사용되는 값으로 추정. MMU가 켜지면 사용되지 않음
+	adrp	x26, swapper_pg_dir // kernel 에 대한 page table. 
+								// arch/arm64/include/asm/pgtable.h 파일 참조
+	mov	x28, lr					// x28 = lr(x30)
 
 	/*
 	 * Invalidate the idmap and swapper page tables to avoid potential
 	 * dirty cache lines being evicted.
 	 */
+	 // idmap & swapper cache 무효화로 예상됨
 	mov	x0, x25
 	add	x1, x26, #SWAPPER_DIR_SIZE
+				// SWAPPER_DIR_SIZE= (SWAPPER_PGTABLE_LEVELS * PAGE_SIZE)
 	bl	__inval_cache_range
-
+		// x0 (idmap 시작) 부터 x1(swpapper 끝) 까지의 cache 영역을 무효화
 	/*
 	 * Clear the idmap and swapper page tables.
 	 */
+	 // idmap 시작부터  swapper 끝까지 0 으로 초기화
+
+	// | idmap        |   swapper      |
+	// |                               |
+	// x25            x26  ------------> (SWAPPER_DIR_SIZE)
+	// x0                              x1
 	mov	x0, x25
 	add	x6, x26, #SWAPPER_DIR_SIZE
-1:	stp	xzr, xzr, [x0], #16
+1:	stp	xzr, xzr, [x0], #16 // ==> *(x0+0)=0; *(x0+8)=0; x0+=16; --> 여기서 16은 #16에서 발생, register size 는 8바이트(64bit)
 	stp	xzr, xzr, [x0], #16
 	stp	xzr, xzr, [x0], #16
 	stp	xzr, xzr, [x0], #16
 	cmp	x0, x6
 	b.lo	1b
 
-	ldr	x7, =SWAPPER_MM_MMUFLAGS
+	ldr	x7, =SWAPPER_MM_MMUFLAGS	// x7 = *(& SWAPPER_MM_MMUFLAGS)
 
 	/*
 	 * Create the identity mapping.
@@ -372,33 +391,65 @@ __create_page_tables:
 	 * the physical address of __idmap_text_end.
 	 */
 	adrp	x5, __idmap_text_end
+		// arch/arm64/kernel/vmlinux.lds.S linker 스크립트에 의해서 값이 결정됨
+		// idmap 관련 코드(text)의 마지막 주소를 의미하는것으로 예상됨
+		// QEMU에서 __idmap_text_end와 __idmap_text_start 값이 동일함
 	clz	x5, x5
-	cmp	x5, TCR_T0SZ(VA_BITS)	// default T0SZ small enough?
-	b.ge	1f			// .. then skip additional level
+		// clz : 선행 0 수 계산
+		// 0x00000001 이라고 가정하면
+		//   1234567  : 7개
+		// 0x00010002 이라고 가정하면
+		//   123      : 3개
+		// 2진수(바이너리) 기준이래요. 알아서 잘!!!!
 
+		// __idmap_text_end 주소 앞의 0 값 개수를 획득
+	cmp	x5, TCR_T0SZ(VA_BITS)	// default T0SZ small enough?
+	/*
+	./arch/arm64/include/asm/pgtable-hwdef.h:#define TCR_T0SZ(x)            ((UL(64) - (x)) << TCR_T0SZ_OFFSET)
+	가상 Address 가 48비트인데, 그것만으로 모든 Address 를 표현할 수 있는가? 를 검사하는 코드로 예상됨
+	*/
+
+	b.ge	1f			// .. then skip additional level
+	// 48 비트로 충분하다면 additional level 코드를 생략한다.
+
+
+	// 현재 지점부터 1: 까지는 additional level 코드임
 	adr_l	x6, idmap_t0sz
 	str	x5, [x6]
 	dmb	sy
 	dc	ivac, x6		// Invalidate potentially stale cache line
 
 	create_table_entry x0, x3, EXTRA_SHIFT, EXTRA_PTRS, x5, x6
+	// 부족한 page table 만큼 추가하는 코드로 예상됨
 1:
 #endif
 
-	create_pgd_entry x0, x3, x5, x6
+	// page table 단계 : pgd > pud > pmd > pte
+	// ARM 이나 X86 에서는 이미 CPU 가 MMU 를 지원하므로,
+	// 전체 4단계중 2단계만 사용됨(pud 와 pmd 가 생략)
+	// pgd 와 pte 만 사용됨
+	// (3단계만 사용되는 경우에는 pud 가 생략됨)
+
+	// 현재 상태에서의 x0, x3, x5, x6값 확인 (위의 additional level 코드가 실행되지 않은 상황을 가정)
+	// x0 : idmap_pg_dir 주소
+	// x3 : __idmap_text_start 의 page 주소(하위 12bit 제거)
+	// x5 : __idmap_text_end의 선행 0 개수
+	// x6 : swapper + SWAPPER_DIR_SIZE
+	create_pgd_entry x0, x3, x5, x6	
 	mov	x5, x3				// __pa(__idmap_text_start)
-	adr_l	x6, __idmap_text_end		// __pa(__idmap_text_end)
+	adr_l	x6, __idmap_text_end		// __pa(__idmap_text_end), 
+										//__idmap_text_end = __idmap_text_start + 0xe0
 	create_block_map x0, x7, x3, x5, x6
 
 	/*
 	 * Map the kernel image (starting with PHYS_OFFSET).
 	 */
 	mov	x0, x26				// swapper_pg_dir
-	ldr	x5, =KIMAGE_VADDR
-	add	x5, x5, x23			// add KASLR displacement
+	ldr	x5, =KIMAGE_VADDR	// x5=*(&KIMAGE_VADDR)
+	add	x5, x5, x23			// add KASLR displacement	Kernel Address Space Layout randomization 커널 영역 랜덤 배치
 	create_pgd_entry x0, x5, x3, x6
-	ldr	w6, kernel_img_size
-	add	x6, x6, x5
+	ldr	w6, kernel_img_size		// kernel_end - (kernel_start - OFFSET)
+	add	x6, x6, x5				// VA + kernel_size
 	mov	x3, x24				// phys offset
 	create_block_map x0, x7, x3, x5, x6
 
@@ -519,24 +570,34 @@ ENTRY(kimage_vaddr)
  * booted in EL1 or EL2 respectively.
  */
 ENTRY(el2_setup)
-	mrs	x0, CurrentEL
-	cmp	x0, #CurrentEL_EL2
-	b.ne	1f
-	mrs	x0, sctlr_el2
-CPU_BE(	orr	x0, x0, #(1 << 25)	)	// Set the EE bit for EL2
-CPU_LE(	bic	x0, x0, #(1 << 25)	)	// Clear the EE bit for EL2
-	msr	sctlr_el2, x0
+	mrs	x0, CurrentEL		// psr 레지스터를 범용레지스터로 이동, QEMU 기준 값=0x4
+	cmp	x0, #CurrentEL_EL2	// x0를 CurrentEL_EL2와 비교, CurrentEL_EL2 상수값은 arm64 defconfig 기준 값=0x8
+	b.ne	1f				// 둘 값이 다르면 1(EL1)로 이동, 아니면2(EL2)
+							// 부팅시 EL1 으로 부팅되었는지 EL2 로 부팅되었는지 확인해서 처리
+	mrs	x0, sctlr_el2		// el2 시스템 컨트롤 레지스터를 x0에 넣기
+CPU_BE(	orr	x0, x0, #(1 << 25)	)	// Set the EE bit for EL2	// x0의 25번째 비트를 1로 설정, 1이면 big endian, 0이면 little endian, EE = exception endian bit
+CPU_LE(	bic	x0, x0, #(1 << 25)	)	// Clear the EE bit for EL2	
+	msr	sctlr_el2, x0				// x0의 값을 시스템 컨트롤 el2로 복사
 	b	2f
-1:	mrs	x0, sctlr_el1
+1:	mrs	x0, sctlr_el1				// 시스템 컨트롤 el1을 x0에 복사
+									// QEMU 기준 값=0xc50838
 CPU_BE(	orr	x0, x0, #(3 << 24)	)	// Set the EE and E0E bits for EL1
 CPU_LE(	bic	x0, x0, #(3 << 24)	)	// Clear the EE and E0E bits for EL1
+									// #(3 << 24) =	 0xfffffffffcffffff
+									//                         0xc50838
+									// http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.den0024a/BABFCAGE.html
+									// Exception endianness 와 Endianness of explicit data accessses at EL0 를
+									// Little Endian 으로 설정
 	msr	sctlr_el1, x0
-	mov	w20, #BOOT_CPU_MODE_EL1		// This cpu booted in EL1
-	isb
-	ret
+	mov	w20, #BOOT_CPU_MODE_EL1		// This cpu booted in EL1 // BOOT_CPU_MODE_EL1를 return
+									// ARM64 defconfig 기준 값=0xE11
+	isb								// 명령어 동기화 배리어 // 리턴 작업 끝나는걸 동기화
+	ret								// 리턴 : QEMU 기준 현재 지점에서 함수 종료
+
+									// QEMU 에서는 EL1 으로 부팅되므로, 아래의 명령어는 실행되지 않음
 
 2:
-#ifdef CONFIG_ARM64_VHE
+#ifdef CONFIG_ARM64_VHE // Virtual Host Extension. host, guest, 일부 레지스터를 공유
 	/*
 	 * Check for VHE being present. For the rest of the EL2 setup,
 	 * x2 being non-zero indicates that we do have VHE, and that the
@@ -545,32 +606,32 @@ CPU_LE(	bic	x0, x0, #(3 << 24)	)	// Clear the EE and E0E bits for EL1
 	mrs	x2, id_aa64mmfr1_el1
 	ubfx	x2, x2, #8, #4
 #else
-	mov	x2, xzr
+	mov	x2, xzr		// zero 레지스터
 #endif
 
 	/* Hyp configuration. */
-	mov	x0, #HCR_RW			// 64-bit EL1
-	cbz	x2, set_hcr
-	orr	x0, x0, #HCR_TGE		// Enable Host Extensions
+	mov	x0, #HCR_RW			// 64-bit EL1	// HCR_RW 값을 x0에 복사
+	cbz	x2, set_hcr			// x2가 0이면 set_hcr로 분기
+	orr	x0, x0, #HCR_TGE		// Enable Host Extensions	// x0레지스터에 HCR_TGE 
 	orr	x0, x0, #HCR_E2H
 set_hcr:
-	msr	hcr_el2, x0
+	msr	hcr_el2, x0			// x0값을 hcr_el2에 넣기
 	isb
 
 	/* Generic timers. */
-	mrs	x0, cnthctl_el2
+	mrs	x0, cnthctl_el2		// 타이머 레지스터 불러와서 셋팅
 	orr	x0, x0, #3			// Enable EL1 physical timers
 	msr	cnthctl_el2, x0
-	msr	cntvoff_el2, xzr		// Clear virtual offset
+	msr	cntvoff_el2, xzr		// Clear virtual offset	// 0값으로 cntvoff_el2 값을 클리어
 
-#ifdef CONFIG_ARM_GIC_V3
+#ifdef CONFIG_ARM_GIC_V3	//generic 인터럽트 컨트롤러 v3
 	/* GICv3 system register access */
-	mrs	x0, id_aa64pfr0_el1
-	ubfx	x0, x0, #24, #4
-	cmp	x0, #1
+	mrs	x0, id_aa64pfr0_el1		// http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0488d/CIHCFJBJ.html
+	ubfx	x0, x0, #24, #4		// 특정 레지스터에서 특정비트를 추출해서 두번째 레지스터에 복사 24부터 4bit 값을 복사해서 x0에 대입, gic 시스템 레지스터 1이면 지원 가능, 0이면 불가
+	cmp	x0, #1		x0값과 1을 비교
 	b.ne	3f
 
-	mrs_s	x0, ICC_SRE_EL2
+	mrs_s	x0, ICC_SRE_EL2			// gic 초기화 비트 셋업 루틴
 	orr	x0, x0, #ICC_SRE_EL2_SRE	// Set ICC_SRE_EL2.SRE==1
 	orr	x0, x0, #ICC_SRE_EL2_ENABLE	// Set ICC_SRE_EL2.Enable==1
 	msr_s	ICC_SRE_EL2, x0
@@ -583,10 +644,10 @@ set_hcr:
 #endif
 
 	/* Populate ID registers. */
-	mrs	x0, midr_el1
-	mrs	x1, mpidr_el1
-	msr	vpidr_el2, x0
-	msr	vmpidr_el2, x1
+	mrs	x0, midr_el1				// main id register x0
+	mrs	x1, mpidr_el1				// 
+	msr	vpidr_el2, x0				// midr_el1값을 vpidr_el2로
+	msr	vmpidr_el2, x1				// mpidr_el1값을 vmpidr_el2로
 
 	/*
 	 * When VHE is not in use, early init of EL2 and EL1 needs to be
@@ -595,16 +656,16 @@ set_hcr:
 	 * requires no configuration, and all non-hyp-specific EL2 setup
 	 * will be done via the _EL1 system register aliases in __cpu_setup.
 	 */
-	cbnz	x2, 1f
+	cbnz	x2, 1f			// x2가 0이 아닌 경우 1로 분기 
 
 	/* sctlr_el1 */
-	mov	x0, #0x0800			// Set/clear RES{1,0} bits
-CPU_BE(	movk	x0, #0x33d0, lsl #16	)	// Set EE and E0E on BE systems
+	mov	x0, #0x0800			// Set/clear RES{1,0} bits		// x0에 0x0800
+CPU_BE(	movk	x0, #0x33d0, lsl #16	)	// Set EE and E0E on BE systems		//16bit integer를 레지스터에 복사. 16bit 이외 값은 수정 안함
 CPU_LE(	movk	x0, #0x30d0, lsl #16	)	// Clear EE and E0E on LE systems
-	msr	sctlr_el1, x0
+	msr	sctlr_el1, x0			//	x0값을 sctlr_el1으로
 
 	/* Coprocessor traps. */
-	mov	x0, #0x33ff
+	mov	x0, #0x33ff				// cptr_el2에 0x33ff 넣기. 하드웨어 익셉션 발생
 	msr	cptr_el2, x0			// Disable copro. traps to EL2
 1:
 
@@ -652,10 +713,11 @@ ENDPROC(el2_setup)
  */
 ENTRY(set_cpu_boot_mode_flag)
 	adr_l	x1, __boot_cpu_mode
-	cmp	w20, #BOOT_CPU_MODE_EL2
+	cmp	w20, #BOOT_CPU_MODE_EL2 // el2_setup() 함수에서 설정한  CPU mode(w20) 이  BOOT_CPU_MODE_EL2 이면 아래 문장 실행
+								// 그렇지 않다면 1: 로 jump
 	b.ne	1f
-	add	x1, x1, #4
-1:	str	w20, [x1]			// This CPU has booted in EL1
+	add	x1, x1, #4			// EL2 인 경우
+1:	str	w20, [x1]			// This CPU has booted in EL1 // EL2 가 아닌 경우
 	dmb	sy
 	dc	ivac, x1			// Invalidate potentially stale cache line
 	ret

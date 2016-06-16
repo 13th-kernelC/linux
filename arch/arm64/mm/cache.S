@@ -120,12 +120,14 @@ ENTRY(__inval_cache_range)
  *	- end     - virtual end address of region
  */
 __dma_inv_range:
-	dcache_line_size x2, x3
+	dcache_line_size x2, x3 // D-Cache line size 획득 함수. QEMU 기준 0x40(64). D-Cache line size ==> D Cache 에서 한번에 가져오는 바이트 크기.
 	sub	x3, x2, #1
 	tst	x1, x3				// end cache line aligned?
-	bic	x1, x1, x3
-	b.eq	1f
-	dc	civac, x1			// clean & invalidate D / U line
+							// tst => reg1 과 reg2 를 AND 연산 후 (저장하지 않고) status register 에만 반영
+	bic	x1, x1, x3			// bit clear (x1=x1 & (~x3))
+	b.eq	1f				// 위의 tst 연산에 의하여 x1 이 D-Cache 라인에 align 되어 있는지 확인.
+							// 인자로 전달된 주소가 0x40(64) 에 정렬(배수)하는지 확인.
+	dc	civac, x1			// clean & invalidate D / U line (분리된 경우에는 Dcache 만, 통합된 경우에는 Ucache -Unified Cache-에서 초기화)
 1:	tst	x0, x3				// start cache line aligned?
 	bic	x0, x0, x3
 	b.eq	2f

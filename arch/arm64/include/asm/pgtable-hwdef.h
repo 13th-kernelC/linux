@@ -79,6 +79,7 @@
 #define PGDIR_SIZE		(_AC(1, UL) << PGDIR_SHIFT)
 #define PGDIR_MASK		(~(PGDIR_SIZE-1))
 #define PTRS_PER_PGD		(1 << (VA_BITS - PGDIR_SHIFT))
+	// VA_BITS : the Maxumum number of Virtual Address Bits. Virtual Address Bits 의 전체 길이로 예상됨
 
 /*
  * Section address mask and size definitions.
