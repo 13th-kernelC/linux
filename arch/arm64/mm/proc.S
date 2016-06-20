@@ -187,14 +187,19 @@ ENDPROC(idmap_cpu_replace_ttbr1)
  *	value of the SCTLR_EL1 register.
  */
 ENTRY(__cpu_setup)				// 여기서부터 시작
-	tlbi	vmalle1				// Invalidate local TLB
-	dsb	nsh
+	tlbi	vmalle1				// Invalidate local TLB //TLB를Invalidate하는 부분 일단 스킵
+	dsb	nsh    //dsb=데이터 동기화 장벽 +nsh?
 
-	mov	x0, #3 << 20
-	msr	cpacr_el1, x0			// Enable FP/ASIMD
+	mov	x0, #3 << 20			// 11을 20번 쉬프트하여 x0에 넣음
+	msr	cpacr_el1, x0			// Enable FP/ASIMD //x0의 값을 cpacr_el1레지스터에 넣음
 	mov	x0, #1 << 12			// Reset mdscr_el1 and disable
-	msr	mdscr_el1, x0			// access to the DCC from EL0
+								// ASIMD Floating 을 트랩하지 않음 
+	msr	mdscr_el1, x0			// access to the DCC from EL1 
+								// mdscr = monitor debug system control register
+								// DCC = debug comunication channel을 유저레벨에서 사용할수 있게 설정
 	reset_pmuserenr_el0 x0			// Disable PMU access from EL0
+									// pmuserenr = 퍼포먼스 모니터링 유닛 유저 인에이블 레지스터
+									// cpu의 정보를 user레벨에서 볼 수 없도록 설정 
 	/*
 	 * Memory region attributes for LPAE:
 	 *
@@ -213,33 +218,45 @@ ENTRY(__cpu_setup)				// 여기서부터 시작
 		     MAIR(0x44, MT_NORMAL_NC) | \
 		     MAIR(0xff, MT_NORMAL) | \
 		     MAIR(0xbb, MT_NORMAL_WT)
+			//MAIR() = 2번째 인자에 8을 곱해 수만큼 첫번째 인자를 왼쪽으로 쉬프트
+			// http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0500d/CIHDHJBB.html
 	msr	mair_el1, x5
+			// 캐쉬 쓰기에 대한 가능 여부를 나타내는 메모리의 종류를 설정
 	/*
-	 * Prepare SCTLR
+	 * Prepare SCTLR //system control register 
 	 */
-	adr	x5, crval
+	adr	x5, crval //pc값에 crval의 값을 더해 x5에 저장
 	ldp	w5, w6, [x5]
-	mrs	x0, sctlr_el1
-	bic	x0, x0, x5			// clear bits
-	orr	x0, x0, x6			// set bits
+				  //w5: clear, w6: set을 워드단위로 복사
+	mrs	x0, sctlr_el1	//x0에 sctlr_el1의 값을 복사
+	bic	x0, x0, x5			// clear bits //qemu에서 x0의 값을 지움
+	orr	x0, x0, x6			// set bits //qemu에서 crval의 set값을 x0에 임시로 저장 -> 이후에 사용
 	/*
 	 * Set/prepare TCR and TTBR. We use 512GB (39-bit) address range for
 	 * both user and kernel.
 	 */
 	ldr	x10, =TCR_TxSZ(VA_BITS) | TCR_CACHE_FLAGS | TCR_SMP_FLAGS | \
 			TCR_TG_FLAGS | TCR_ASID16 | TCR_TBI0
-	tcr_set_idmap_t0sz	x10, x9
+			//http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0488d/CIHFFGFG.html
+			//내부적으로 TCR_T0SZ(x)과  TCR_T1SZ(x) 을 호출하여 제일 처음의 페이지 테이블 주소의 오프셋(TTBR)을 트렌스레이션 컨트롤 레지스터(TCR)를 이용하여 설정
+			//TCR_CACHE_FLAGS : cacheability attribute for memory associated with translation table walks using TTBR0 , TTBR1
+			//TCR_SMP_FLAGS: sh관련 설정
+			//TCR_TG_FLAGS: TTBR의 최소 사이즈 4KB or 64KB 설정
+			//TCR_ASID16: ASID size 8bit or 16bit
+			//TCR_TBI0: Top Byte Ignored
+	tcr_set_idmap_t0sz	x10, x9		// TTBR의주소 영역 지정
 
 	/*
 	 * Read the PARange bits from ID_AA64MMFR0_EL1 and set the IPS bits in
 	 * TCR_EL1.
 	 */
 	mrs	x9, ID_AA64MMFR0_EL1
-	bfi	x10, x9, #32, #3
+	bfi	x10, x9, #32, #3	// ID_AA64MMFR0_EL1의 [3:0]PARange 값을 TCR [34:32] IPS로 복사
 #ifdef CONFIG_ARM64_HW_AFDBM
 	/*
 	 * Hardware update of the Access and Dirty bits.
 	 */
+	// 하드웨어적으로 Dirty flag와 Access flag를 지원하는지 체크
 	mrs	x9, ID_AA64MMFR1_EL1
 	and	x9, x9, #0xf
 	cbz	x9, 2f
@@ -249,7 +266,7 @@ ENTRY(__cpu_setup)				// 여기서부터 시작
 1:	orr	x10, x10, #TCR_HA		// hardware Access flag update
 2:
 #endif	/* CONFIG_ARM64_HW_AFDBM */
-	msr	tcr_el1, x10
+	msr	tcr_el1, x10	// x10을 통해 레지스터 값을 셋팅한 후 TCR_EL1 레지스터에 업데이트
 	ret					// return to head.S
 ENDPROC(__cpu_setup)
 

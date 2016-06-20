@@ -58,8 +58,9 @@
  */
 	.macro	tcr_set_idmap_t0sz, valreg, tmpreg
 #ifndef CONFIG_ARM64_VA_BITS_48
-	ldr_l	\tmpreg, idmap_t0sz
+	ldr_l	\tmpreg, idmap_t0sz	//tmpreg에 idmap_t0sz 값을 가져옴
 	bfi	\valreg, \tmpreg, #TCR_T0SZ_OFFSET, #TCR_TxSZ_WIDTH
+	// valreg에 TCR_T0SZ_OFFSET부터 #TCR_TxSZ_WIDTH만큼의 값을 읽어와 tmpreg를 교체
 #endif
 	.endm
 

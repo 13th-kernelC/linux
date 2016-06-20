@@ -475,17 +475,20 @@ kernel_img_size:
  */
 	.set	initial_sp, init_thread_union + THREAD_START_SP
 __mmap_switched:
-	mov	x28, lr				// preserve LR
+	mov	x28, lr				// preserve LR		// lr값을 x28로 이동
 	adr_l	x8, vectors			// load VBAR_EL1 with virtual
+								// entry.S의vectors 주소를 x8에 복사
 	msr	vbar_el1, x8			// vector table address
+								// Vector Base Address Register
 	isb
 
 	// Clear BSS
-	adr_l	x0, __bss_start
-	mov	x1, xzr
-	adr_l	x2, __bss_stop
-	sub	x2, x2, x0
-	bl	__pi_memset
+	adr_l	x0, __bss_start		// __bss_start = .
+	mov	x1, xzr					// zero register를 x1으로 이동
+	adr_l	x2, __bss_stop		// __bss_stop = .
+	sub	x2, x2, x0				// x2 = x2 - x0, 결론은 __bss 사이즈가 저장
+	bl	__pi_memset				// arch/arm64/lib/memset.S의 memset으로 이동
+								// bss 영역을 0으로 초기화
 	dsb	ishst				// Make zero page visible to PTW
 
 #ifdef CONFIG_RELOCATABLE
@@ -525,16 +528,21 @@ __mmap_switched:
 	dc	cvac, x8			// value visible to secondaries
 	dsb	sy				// with MMU off
 #endif
-
-	adr_l	sp, initial_sp, x4
-	mov	x4, sp
-	and	x4, x4, #~(THREAD_SIZE - 1)
+	// 커널에 대한 thread_info 생성과정
+	adr_l	sp, initial_sp, x4		// sp에 initial_sp 값을 넣음
+	mov	x4, sp						// sp값을 x4로
+	and	x4, x4, #~(THREAD_SIZE - 1)	// THREAD_SIZE = PAGE_SIZE * 2
+									// 2^13만큼 0으로 클리어
 	msr	sp_el0, x4			// Save thread_info
-	str_l	x21, __fdt_pointer, x5		// Save FDT pointer
+	str_l	x21, __fdt_pointer, x5		// Save FDT pointer // kernel randomize 관련 설정
 
 	ldr_l	x4, kimage_vaddr		// Save the offset between
+									// 커널의 물리주소와 가상주소의 거리 차이
 	sub	x4, x4, x24			// the kernel virtual and
+							// x24에 커널의 물리주소, x4에 커널 가상주소
 	str_l	x4, kimage_voffset, x5		// physical mappings
+										// 커널 가상주소 0x0으로 접근하면
+										// kimage_voffset을 더함. 여기서 커널 물리주소
 
 	mov	x29, #0
 #ifdef CONFIG_KASAN
@@ -628,7 +636,7 @@ set_hcr:
 	/* GICv3 system register access */
 	mrs	x0, id_aa64pfr0_el1		// http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0488d/CIHCFJBJ.html
 	ubfx	x0, x0, #24, #4		// 특정 레지스터에서 특정비트를 추출해서 두번째 레지스터에 복사 24부터 4bit 값을 복사해서 x0에 대입, gic 시스템 레지스터 1이면 지원 가능, 0이면 불가
-	cmp	x0, #1		x0값과 1을 비교
+	cmp	x0, #1		//x0값과 1을 비교
 	b.ne	3f
 
 	mrs_s	x0, ICC_SRE_EL2			// gic 초기화 비트 셋업 루틴
@@ -806,9 +814,9 @@ ENDPROC(__secondary_switched)
 
 	.macro	update_early_cpu_boot_status status, tmp1, tmp2
 	mov	\tmp2, #\status
-	adr_l	\tmp1, __early_cpu_boot_status
-	str	\tmp2, [\tmp1]
-	dmb	sy
+	adr_l	\tmp1, __early_cpu_boot_status	// tmp1에 __early_cpu_boot_status 주소 값 삽입
+	str	\tmp2, [\tmp1]		// tmp1에 있는 0을 tmp2에 쓰기
+	dmb	sy					// sync
 	dc	ivac, \tmp1			// Invalidate potentially stale cache line
 	.endm
 
@@ -832,27 +840,30 @@ ENTRY(__early_cpu_boot_status)
 	.section	".idmap.text", "ax"
 __enable_mmu:
 	mrs	x22, sctlr_el1			// preserve old SCTLR_EL1 value
-	mrs	x1, ID_AA64MMFR0_EL1
+								// sctlr_el1 값을 x22에 복사
+	mrs	x1, ID_AA64MMFR0_EL1	// ID_AA64MMFR0_EL1 값을 x1에 복사
 	ubfx	x2, x1, #ID_AA64MMFR0_TGRAN_SHIFT, 4
+	// Page 크기가 4KB, 16KB, 64KB 중 어느것을 지워하는지 확인
+	// qemu에서 4KB를 지원하는지 비교
 	cmp	x2, #ID_AA64MMFR0_TGRAN_SUPPORTED
-	b.ne	__no_granule_support
-	update_early_cpu_boot_status 0, x1, x2
-	msr	ttbr0_el1, x25			// load TTBR0
-	msr	ttbr1_el1, x26			// load TTBR1
-	isb
-	msr	sctlr_el1, x0
+	b.ne	__no_granule_support	// 지원 안할 경우 무한루프
+	update_early_cpu_boot_status 0, x1, x2		// 비교해서 문제 없으면 여기로 점프
+	msr	ttbr0_el1, x25			// load TTBR0	// 2주전에 설정한 TTBR 값
+	msr	ttbr1_el1, x26			// load TTBR1	// TTBR1 값
+	isb							// instruction sync barrier
+	msr	sctlr_el1, x0			// x0값을 sctlr_el1에로드
 	isb
 	/*
 	 * Invalidate the local I-cache so that any instructions fetched
 	 * speculatively from the PoC are discarded, since they may have
 	 * been dynamically patched at the PoU.
 	 */
-	ic	iallu
-	dsb	nsh
-	isb
-#ifdef CONFIG_RANDOMIZE_BASE
+	ic	iallu		// instruction cache = ic, instruction cache invalidate
+	dsb	nsh			// data sync barrier
+	isb				
+#ifdef CONFIG_RANDOMIZE_BASE	// 보안을 위해 커널 시작주소를 랜덤설정
 	mov	x19, x0				// preserve new SCTLR_EL1 value
-	blr	x27
+	blr	x27	
 
 	/*
 	 * If we return here, we have a KASLR displacement in x23 which we need
@@ -870,7 +881,7 @@ __enable_mmu:
 	isb
 	add	x27, x27, x23			// relocated __mmap_switched
 #endif
-	br	x27
+	br	x27					// __cpu_setup가 끝나고 돌아가려고 저장된 x27을 여기서 사용
 ENDPROC(__enable_mmu)
 
 __no_granule_support:
